@@ -142,24 +142,24 @@ module.exports = (ctx) => {
     await Promise.all(
       projects.map(async (project) => {
         const timeSpent = project.inQueueUptimeInSeconds + 60;
-        project.inQueueUptimeInSeconds = timeSpent;
-        project.timeLeftInQueue =
+        const timeLeftInQueue =
           timeConverter.convertSecondsIntoTimeLeftProject(timeSpent);
-        const { h, m } = project.timeLeftInQueue;
+        const { h, m } = timeLeftInQueue;
+        const update = { inQueueUptimeInSeconds: timeSpent, timeLeftInQueue };
 
         if (h === 0 && m === 0) {
-          project.inQueue = false;
+          update.inQueue = false;
           const body = {
             projectId: project._id,
             listingsArray: project.matchedListings.map((l) => l.listing)
           };
-          // fire-and-forget — don't block the save
+          // fire-and-forget — don't block the update
           axios
             .post(`${config.url}/manager/submit-project-specs`, body)
             .catch(console.error);
         }
 
-        return project.save();
+        return Project.updateOne({ _id: project._id }, { $set: update });
       })
     );
   }
@@ -193,7 +193,7 @@ module.exports = (ctx) => {
     await Promise.all(
       projects.map(async (project) => {
         const matchedSeconds = project.matchedTimeInSeconds + 60;
-        project.matchedTimeInSeconds = matchedSeconds;
+        const update = { matchedTimeInSeconds: matchedSeconds };
 
         const timeInHours =
           timeConverter.convertSecondsIntoTimeLeftQuotes(matchedSeconds);
@@ -217,31 +217,38 @@ module.exports = (ctx) => {
           ? timeInHours.m >= timingAllowed
           : timeInHours.h === timingAllowed;
 
+        // Tracks the effective assignedListings after this tick's changes,
+        // for the hasAnyQuote check below — mirrors the original code's
+        // behavior of reading project.assignedListings after it had already
+        // been reassigned in the block above.
+        let currentAssignedListings = project.assignedListings;
+
         if (hitQuoteDeadline) {
-          //  project.showQuotesAfter24Hour = true;
           const removedListings = [];
+          const keptListings = [];
 
           for (const listingId of project.assignedListings) {
             const key = `${project._id}_${listingId}`;
             const quote = quotesMap.get(key);
 
             if (!quote) {
-              project.assignedListings = project.assignedListings.filter(
-                (e) => e !== listingId
-              );
               removedListings.push(listingId);
             } else {
-              project.projectStage = 'Quote Delivered';
+              keptListings.push(listingId);
+              update.projectStage = 'Quote Delivered';
               if (
                 !project.ownerNotifiedAboutQuoteReceived &&
                 project.findSpaceUserId
               ) {
                 // sender.sendTemplateEmail(...) — commented out in original
-                project.ownerNotifiedAboutQuoteReceived = true;
+                update.ownerNotifiedAboutQuoteReceived = true;
               }
             }
           }
-          project.removedListingsAfter24Hours = removedListings;
+
+          currentAssignedListings = keptListings;
+          update.assignedListings = keptListings;
+          update.removedListingsAfter24Hours = removedListings;
         }
 
         // 16h / 10min (test) — no quote returned email
@@ -254,7 +261,7 @@ module.exports = (ctx) => {
           !project.ownerNotifiedAboutQuotesRecievedAfterSixteenHours &&
           project.findSpaceUserId
         ) {
-          const hasAnyQuote = project.assignedListings.some((listingId) =>
+          const hasAnyQuote = currentAssignedListings.some((listingId) =>
             quotesMap.has(`${project._id}_${listingId}`)
           );
 
@@ -271,10 +278,10 @@ module.exports = (ctx) => {
               'Project ' + project.idNo + ' : No Quote Returned yet'
             );
           }
-          project.ownerNotifiedAboutQuotesRecievedAfterSixteenHours = true;
+          update.ownerNotifiedAboutQuotesRecievedAfterSixteenHours = true;
         }
 
-        return project.save();
+        return Project.updateOne({ _id: project._id }, { $set: update });
       })
     );
   }
@@ -330,12 +337,14 @@ module.exports = (ctx) => {
           });
           await ticket.save();
 
-          if (invoice.status === 'Payment Disputed') {
-            invoice.ticketGeneratedAutomaticallyForDispute = true;
-          } else {
-            invoice.ticketGeneratedAutomaticallyForFailed = true;
-          }
-          await invoice.save();
+          const ticketFlagUpdate =
+            invoice.status === 'Payment Disputed'
+              ? { ticketGeneratedAutomaticallyForDispute: true }
+              : { ticketGeneratedAutomaticallyForFailed: true };
+          await Invoice.updateOne(
+            { _id: invoice._id },
+            { $set: ticketFlagUpdate }
+          );
         } catch (err) {
           console.error('[QueueTracker] ticket creation error:', err.message);
         }
@@ -352,13 +361,16 @@ module.exports = (ctx) => {
     await Promise.all(
       projects.map(async (project) => {
         const timeSpent = project.uptimeAsQuoteDeliveredStage + 60;
-        project.uptimeAsQuoteDeliveredStage = timeSpent;
-        project.timeLeftAsQuoteDeliveredStage =
+        const timeLeftAsQuoteDeliveredStage =
           timeConverter.convertSecondsIntoTimeLeftNonResponsiveStages(
             timeSpent,
             86400
           );
-        const { h, m } = project.timeLeftAsQuoteDeliveredStage;
+        const { h, m } = timeLeftAsQuoteDeliveredStage;
+        const update = {
+          uptimeAsQuoteDeliveredStage: timeSpent,
+          timeLeftAsQuoteDeliveredStage
+        };
 
         if (h === 0 && m === 0) {
           if (
@@ -382,10 +394,10 @@ module.exports = (ctx) => {
               'Project ' + project.idNo + ': No Activity After 72 Hours'
             );
           }
-          project.salesTeamNotifiedAboutQuoteDeliveredStage = true;
+          update.salesTeamNotifiedAboutQuoteDeliveredStage = true;
         }
 
-        return project.save();
+        return Project.updateOne({ _id: project._id }, { $set: update });
       })
     );
   }
@@ -399,13 +411,16 @@ module.exports = (ctx) => {
     await Promise.all(
       projects.map(async (project) => {
         const timeSpent = project.uptimeAsWarehouseSelectedStage + 60;
-        project.uptimeAsWarehouseSelectedStage = timeSpent;
-        project.timeLeftAsWarehouseSelectedStage =
+        const timeLeftAsWarehouseSelectedStage =
           timeConverter.convertSecondsIntoTimeLeftNonResponsiveStages(
             timeSpent,
             86400
           );
-        const { h, m } = project.timeLeftAsWarehouseSelectedStage;
+        const { h, m } = timeLeftAsWarehouseSelectedStage;
+        const update = {
+          uptimeAsWarehouseSelectedStage: timeSpent,
+          timeLeftAsWarehouseSelectedStage
+        };
 
         if (h === 0 && m === 0) {
           const provider =
@@ -430,10 +445,10 @@ module.exports = (ctx) => {
               'Project ' + project.idNo + ': No Contract Received From Howzer'
             );
           }
-          project.salesTeamNotifiedAboutWarehouseSelectedStage = true;
+          update.salesTeamNotifiedAboutWarehouseSelectedStage = true;
         }
 
-        return project.save();
+        return Project.updateOne({ _id: project._id }, { $set: update });
       })
     );
   }
@@ -489,9 +504,10 @@ module.exports = (ctx) => {
     await Promise.all(
       toNotify.map(async (project) => {
         // email send is commented out in original — preserving that intent
-        project.howzerToBeNotifiedAboutInvoiceEmail = true;
-
-        return project.save();
+        return Project.updateOne(
+          { _id: project._id },
+          { $set: { howzerToBeNotifiedAboutInvoiceEmail: true } }
+        );
       })
     );
   }

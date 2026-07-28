@@ -95,3 +95,11 @@ main().catch((err) => {
   console.error('❌ Failed to load secrets or start cron service:', err);
   process.exit(1);
 });
+
+process.on('uncaughtException', (err) => {
+  console.error('[CronService] uncaughtException:', err);
+});
+
+process.on('unhandledRejection', (err) => {
+  console.error('[CronService] unhandledRejection:', err);
+});
