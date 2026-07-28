@@ -58,8 +58,17 @@ module.exports = (ctx) => {
     ] = await Promise.all([
       // 1. Invoices needing ticket creation (always runs)
       Invoice.find({
-        $or: [{ status: 'Payment Failed' }, { status: 'Payment Disputed' }],
-        createdAt: { $gte: BASE_DATE_PROJECT }
+        createdAt: { $gte: BASE_DATE_PROJECT },
+        $or: [
+          {
+            status: 'Payment Disputed',
+            ticketGeneratedAutomaticallyForDispute: false
+          },
+          {
+            status: 'Payment Failed',
+            ticketGeneratedAutomaticallyForFailed: false
+          }
+        ]
       })
         .populate('findSpaceUserId project')
         .exec(),
@@ -87,7 +96,11 @@ module.exports = (ctx) => {
         .exec(),
 
       // 4. Active projects for invoice notification (always runs)
-      Project.find({ status: 'Active', createdAt: { $gte: BASE_DATE_ACTIVE } })
+      Project.find({
+        status: 'Active',
+        createdAt: { $gte: BASE_DATE_ACTIVE },
+        howzerToBeNotifiedAboutInvoiceEmail: { $ne: true }
+      })
         .populate('listSpaceUserId')
         .exec(),
 
