@@ -43,6 +43,8 @@ jobs:
             --min-instances=1 \
             --max-instances=1 \
             --no-cpu-throttling \
+            --memory=1Gi \
+            --set-env-vars=NODE_OPTIONS=--max-old-space-size=768 \
             --port=8080 \
             --vpc-connector=warehowz-connector \
             --vpc-egress=all-traffic
