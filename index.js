@@ -1,7 +1,24 @@
+const http = require('http');
 const { getEnvFromSecretManager } = require('./config/secret-manager');
 const config = require('./config');
 
+// Cloud Run requires the container to bind $PORT and answer health checks;
+// this service is otherwise a pure background worker with no inbound traffic.
+function startHealthServer() {
+  const port = process.env.PORT || 8080;
+  http
+    .createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('ok');
+    })
+    .listen(port, () => {
+      console.log(`✅ Health check server listening on port ${port}`);
+    });
+}
+
 async function main() {
+  startHealthServer();
+
   const secrets = await getEnvFromSecretManager();
   config.init(secrets);
   console.log(`✅ Cron service initialized secrets for ${config.NODE_ENV}`);
