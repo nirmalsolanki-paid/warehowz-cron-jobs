@@ -1,0 +1,76 @@
+<html xmlns="http://www.w3.org/1999/xhtml">
+
+<head>
+    <title>Internal_email-29</title>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <style>
+            .table-bordered  {
+              border-collapse: collapse;
+              width: 100%;
+              page-break-inside:auto;
+              font-size: 10px;
+            }
+          
+            .table-bordered ,.table-bordered  th,.table-bordered  td {
+              border: 1px solid black;
+              page-break-after:auto;
+            }
+            .table-bordered tr{
+              page-break-inside:avoid;
+              page-break-after:auto;
+            }
+            .col-md-1{
+              width: 10%;
+            }
+            .col-md-2{
+              width: 20%;
+            }
+            .col-md-3{
+              width: 30%;
+            }
+            .col-md-4{
+              width: 40%;
+            }
+            .text-center{
+              text-align: center;
+            }
+          
+          </style>
+</head>
+<body>
+        Hello,
+        
+        A new user has registered at <%- url %> as "Provider".  Please find the details below.
+
+    <table class="table table-stripped table-bordered">
+        <tbody>
+            <tr>
+                <td>First Name</td>
+                <td><%- provider.firstName %></td>
+            </tr>
+            <tr>
+                <td>Last name</td>
+                <td><%- provider.lastName %></td>
+            </tr>
+            <tr>
+                <td>Business Email</td>
+                <td><%- provider.businessEmail %></td>
+            </tr>
+            <tr>
+                <td>Company Name</td>
+                <td><%- provider.companyName %></td>
+            </tr>
+            <tr>
+                <td>Phone Number</td>
+                <td><%- provider.phoneNumber %></td>
+            </tr>
+            <tr>
+                <td>Time Zone</td>
+                <td><%- provider.timeZone %></td>
+            </tr>
+        </tbody>
+    </table>
+</body>
+
+</html>
