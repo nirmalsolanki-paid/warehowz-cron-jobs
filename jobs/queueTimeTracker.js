@@ -6,6 +6,15 @@ const timeConverter = require('../lib/timeConverter');
 const padLeft = (nr, n, str) =>
   Array(n - String(nr).length + 1).join(str || '0') + nr;
 
+const CHUNK_SIZE = 25;
+
+async function processInChunks(items, chunkSize, handler) {
+  for (let i = 0; i < items.length; i += chunkSize) {
+    const chunk = items.slice(i, i + chunkSize);
+    await Promise.all(chunk.map(handler));
+  }
+}
+
 module.exports = (ctx) => {
   const { config, sender, emailsConfig } = ctx;
   const Project = mongoose.model('Project');
@@ -139,29 +148,27 @@ module.exports = (ctx) => {
   async function processInQueueProjects(projects) {
     if (!projects.length) return;
 
-    await Promise.all(
-      projects.map(async (project) => {
-        const timeSpent = project.inQueueUptimeInSeconds + 60;
-        const timeLeftInQueue =
-          timeConverter.convertSecondsIntoTimeLeftProject(timeSpent);
-        const { h, m } = timeLeftInQueue;
-        const update = { inQueueUptimeInSeconds: timeSpent, timeLeftInQueue };
+    await processInChunks(projects, CHUNK_SIZE, async (project) => {
+      const timeSpent = project.inQueueUptimeInSeconds + 60;
+      const timeLeftInQueue =
+        timeConverter.convertSecondsIntoTimeLeftProject(timeSpent);
+      const { h, m } = timeLeftInQueue;
+      const update = { inQueueUptimeInSeconds: timeSpent, timeLeftInQueue };
 
-        if (h === 0 && m === 0) {
-          update.inQueue = false;
-          const body = {
-            projectId: project._id,
-            listingsArray: project.matchedListings.map((l) => l.listing)
-          };
-          // fire-and-forget — don't block the update
-          axios
-            .post(`${config.url}/manager/submit-project-specs`, body)
-            .catch(console.error);
-        }
+      if (h === 0 && m === 0) {
+        update.inQueue = false;
+        const body = {
+          projectId: project._id,
+          listingsArray: project.matchedListings.map((l) => l.listing)
+        };
+        // fire-and-forget — don't block the update
+        axios
+          .post(`${config.url}/manager/submit-project-specs`, body)
+          .catch(console.error);
+      }
 
-        return Project.updateOne({ _id: project._id }, { $set: update });
-      })
-    );
+      return Project.updateOne({ _id: project._id }, { $set: update });
+    });
   }
 
   // ─────────────────────────────────────────────
@@ -190,100 +197,96 @@ module.exports = (ctx) => {
       quotesMap.set(`${q.projectId}_${q.listId}`, q);
     });
 
-    await Promise.all(
-      projects.map(async (project) => {
-        const matchedSeconds = project.matchedTimeInSeconds + 60;
-        const update = { matchedTimeInSeconds: matchedSeconds };
+    await processInChunks(projects, CHUNK_SIZE, async (project) => {
+      const matchedSeconds = project.matchedTimeInSeconds + 60;
+      const update = { matchedTimeInSeconds: matchedSeconds };
 
-        const timeInHours =
-          timeConverter.convertSecondsIntoTimeLeftQuotes(matchedSeconds);
+      const timeInHours =
+        timeConverter.convertSecondsIntoTimeLeftQuotes(matchedSeconds);
 
-        // Determine allowed window based on project type
-        const type = project && project.project_type;
-        let timingAllowed;
-        if (
-          ['Storage or Cross-Docking', 'Storage + B2B Fulfillment'].includes(
-            type
-          )
-        ) {
-          timingAllowed = config.test ? 10 : 24;
-        } else if (['Storage + B2C Fulfillment', 'Other'].includes(type)) {
-          timingAllowed = config.test ? 15 : 40;
-        } else if (['Storage', 'Fulfillment'].includes(type)) {
-          timingAllowed = config.test ? 10 : 40;
-        }
+      // Determine allowed window based on project type
+      const type = project && project.project_type;
+      let timingAllowed;
+      if (
+        ['Storage or Cross-Docking', 'Storage + B2B Fulfillment'].includes(type)
+      ) {
+        timingAllowed = config.test ? 10 : 24;
+      } else if (['Storage + B2C Fulfillment', 'Other'].includes(type)) {
+        timingAllowed = config.test ? 15 : 40;
+      } else if (['Storage', 'Fulfillment'].includes(type)) {
+        timingAllowed = config.test ? 10 : 40;
+      }
 
-        const hitQuoteDeadline = config.test
-          ? timeInHours.m >= timingAllowed
-          : timeInHours.h === timingAllowed;
+      const hitQuoteDeadline = config.test
+        ? timeInHours.m >= timingAllowed
+        : timeInHours.h === timingAllowed;
 
-        // Tracks the effective assignedListings after this tick's changes,
-        // for the hasAnyQuote check below — mirrors the original code's
-        // behavior of reading project.assignedListings after it had already
-        // been reassigned in the block above.
-        let currentAssignedListings = project.assignedListings;
+      // Tracks the effective assignedListings after this tick's changes,
+      // for the hasAnyQuote check below — mirrors the original code's
+      // behavior of reading project.assignedListings after it had already
+      // been reassigned in the block above.
+      let currentAssignedListings = project.assignedListings;
 
-        if (hitQuoteDeadline) {
-          const removedListings = [];
-          const keptListings = [];
+      if (hitQuoteDeadline) {
+        const removedListings = [];
+        const keptListings = [];
 
-          for (const listingId of project.assignedListings) {
-            const key = `${project._id}_${listingId}`;
-            const quote = quotesMap.get(key);
+        for (const listingId of project.assignedListings) {
+          const key = `${project._id}_${listingId}`;
+          const quote = quotesMap.get(key);
 
-            if (!quote) {
-              removedListings.push(listingId);
-            } else {
-              keptListings.push(listingId);
-              update.projectStage = 'Quote Delivered';
-              if (
-                !project.ownerNotifiedAboutQuoteReceived &&
-                project.findSpaceUserId
-              ) {
-                // sender.sendTemplateEmail(...) — commented out in original
-                update.ownerNotifiedAboutQuoteReceived = true;
-              }
+          if (!quote) {
+            removedListings.push(listingId);
+          } else {
+            keptListings.push(listingId);
+            update.projectStage = 'Quote Delivered';
+            if (
+              !project.ownerNotifiedAboutQuoteReceived &&
+              project.findSpaceUserId
+            ) {
+              // sender.sendTemplateEmail(...) — commented out in original
+              update.ownerNotifiedAboutQuoteReceived = true;
             }
           }
-
-          currentAssignedListings = keptListings;
-          update.assignedListings = keptListings;
-          update.removedListingsAfter24Hours = removedListings;
         }
 
-        // 16h / 10min (test) — no quote returned email
-        const hitEmailDeadline = config.test
-          ? timeInHours.m >= 10
-          : timeInHours.h === 16;
+        currentAssignedListings = keptListings;
+        update.assignedListings = keptListings;
+        update.removedListingsAfter24Hours = removedListings;
+      }
 
-        if (
-          hitEmailDeadline &&
-          !project.ownerNotifiedAboutQuotesRecievedAfterSixteenHours &&
-          project.findSpaceUserId
-        ) {
-          const hasAnyQuote = currentAssignedListings.some((listingId) =>
-            quotesMap.has(`${project._id}_${listingId}`)
+      // 16h / 10min (test) — no quote returned email
+      const hitEmailDeadline = config.test
+        ? timeInHours.m >= 10
+        : timeInHours.h === 16;
+
+      if (
+        hitEmailDeadline &&
+        !project.ownerNotifiedAboutQuotesRecievedAfterSixteenHours &&
+        project.findSpaceUserId
+      ) {
+        const hasAnyQuote = currentAssignedListings.some((listingId) =>
+          quotesMap.has(`${project._id}_${listingId}`)
+        );
+
+        if (!hasAnyQuote) {
+          sender.sendTemplateEmail(
+            'no_quote_returned_for_depoziter',
+            {
+              email: project.findSpaceUserId.businessEmail,
+              name: project.findSpaceUserId.firstName,
+              idNo: project.idNo
+            },
+            emailsConfig.noQuoteSubmitted,
+            '',
+            'Project ' + project.idNo + ' : No Quote Returned yet'
           );
-
-          if (!hasAnyQuote) {
-            sender.sendTemplateEmail(
-              'no_quote_returned_for_depoziter',
-              {
-                email: project.findSpaceUserId.businessEmail,
-                name: project.findSpaceUserId.firstName,
-                idNo: project.idNo
-              },
-              emailsConfig.noQuoteSubmitted,
-              '',
-              'Project ' + project.idNo + ' : No Quote Returned yet'
-            );
-          }
-          update.ownerNotifiedAboutQuotesRecievedAfterSixteenHours = true;
         }
+        update.ownerNotifiedAboutQuotesRecievedAfterSixteenHours = true;
+      }
 
-        return Project.updateOne({ _id: project._id }, { $set: update });
-      })
-    );
+      return Project.updateOne({ _id: project._id }, { $set: update });
+    });
   }
 
   // ─────────────────────────────────────────────
@@ -315,43 +318,41 @@ module.exports = (ctx) => {
 
     if (!toProcess.length) return;
 
-    await Promise.all(
-      toProcess.map(async (invoice) => {
-        try {
-          const count = await Tickets.countDocuments({});
-          const description =
-            invoice.status === 'Payment Disputed'
-              ? `This is an autogenerated ticket to report the below incident - <br/>Invoice Number ${invoice.globalInvoiceNumber} was disputed by Shipper (${invoice.findSpaceUserId.businessEmail}) on ${moment(invoice.disputeHistory.date).format('MM/DD/YYYY')}, and no action has been entered in the system for the same, since three days.`
-              : `This is an autogenerated ticket to report the below incident - <br/>Invoice Number ${invoice.globalInvoiceNumber} against project ${invoice.project ? invoice.project.idNo : 'N/A'} has failed when run on ${invoice.failedHistory.reSubmittedDate ? moment(invoice.failedHistory.reSubmittedDate).format('MM/DD/YYYY') : moment(invoice.failedHistory.date).format('MM/DD/YYYY')}.`;
+    await processInChunks(toProcess, CHUNK_SIZE, async (invoice) => {
+      try {
+        const count = await Tickets.countDocuments({});
+        const description =
+          invoice.status === 'Payment Disputed'
+            ? `This is an autogenerated ticket to report the below incident - <br/>Invoice Number ${invoice.globalInvoiceNumber} was disputed by Shipper (${invoice.findSpaceUserId.businessEmail}) on ${moment(invoice.disputeHistory.date).format('MM/DD/YYYY')}, and no action has been entered in the system for the same, since three days.`
+            : `This is an autogenerated ticket to report the below incident - <br/>Invoice Number ${invoice.globalInvoiceNumber} against project ${invoice.project ? invoice.project.idNo : 'N/A'} has failed when run on ${invoice.failedHistory.reSubmittedDate ? moment(invoice.failedHistory.reSubmittedDate).format('MM/DD/YYYY') : moment(invoice.failedHistory.date).format('MM/DD/YYYY')}.`;
 
-          const ticket = new Tickets({
-            ticketId: `TK${padLeft(count + 1, 4)}`,
-            automaticallyCreated: true,
-            projectId: invoice.project
-              ? mongoose.Types.ObjectId(invoice.project._id)
-              : null,
-            listingId: mongoose.Types.ObjectId(invoice.listing),
-            issueWith: 'Customer Support',
-            withRespectTo: 'Manager',
-            description,
-            status: 'New',
-            createdAt: Date.now()
-          });
-          await ticket.save();
+        const ticket = new Tickets({
+          ticketId: `TK${padLeft(count + 1, 4)}`,
+          automaticallyCreated: true,
+          projectId: invoice.project
+            ? mongoose.Types.ObjectId(invoice.project._id)
+            : null,
+          listingId: mongoose.Types.ObjectId(invoice.listing),
+          issueWith: 'Customer Support',
+          withRespectTo: 'Manager',
+          description,
+          status: 'New',
+          createdAt: Date.now()
+        });
+        await ticket.save();
 
-          const ticketFlagUpdate =
-            invoice.status === 'Payment Disputed'
-              ? { ticketGeneratedAutomaticallyForDispute: true }
-              : { ticketGeneratedAutomaticallyForFailed: true };
-          await Invoice.updateOne(
-            { _id: invoice._id },
-            { $set: ticketFlagUpdate }
-          );
-        } catch (err) {
-          console.error('[QueueTracker] ticket creation error:', err.message);
-        }
-      })
-    );
+        const ticketFlagUpdate =
+          invoice.status === 'Payment Disputed'
+            ? { ticketGeneratedAutomaticallyForDispute: true }
+            : { ticketGeneratedAutomaticallyForFailed: true };
+        await Invoice.updateOne(
+          { _id: invoice._id },
+          { $set: ticketFlagUpdate }
+        );
+      } catch (err) {
+        console.error('[QueueTracker] ticket creation error:', err.message);
+      }
+    });
   }
 
   // ─────────────────────────────────────────────
@@ -360,48 +361,46 @@ module.exports = (ctx) => {
   async function processQuoteDeliveredProjects(projects) {
     if (!projects.length) return;
 
-    await Promise.all(
-      projects.map(async (project) => {
-        const timeSpent = project.uptimeAsQuoteDeliveredStage + 60;
-        const timeLeftAsQuoteDeliveredStage =
-          timeConverter.convertSecondsIntoTimeLeftNonResponsiveStages(
-            timeSpent,
-            86400
+    await processInChunks(projects, CHUNK_SIZE, async (project) => {
+      const timeSpent = project.uptimeAsQuoteDeliveredStage + 60;
+      const timeLeftAsQuoteDeliveredStage =
+        timeConverter.convertSecondsIntoTimeLeftNonResponsiveStages(
+          timeSpent,
+          86400
+        );
+      const { h, m } = timeLeftAsQuoteDeliveredStage;
+      const update = {
+        uptimeAsQuoteDeliveredStage: timeSpent,
+        timeLeftAsQuoteDeliveredStage
+      };
+
+      if (h === 0 && m === 0) {
+        if (
+          !project.salesTeamNotifiedAboutQuoteDeliveredStage &&
+          project.findSpaceUserId
+        ) {
+          sender.sendTemplateEmail(
+            'quoteDeliveredandnoActivityAfter72Hours',
+            {
+              email: project.findSpaceUserId.businessEmail,
+              name: project.findSpaceUserId.firstName,
+              idNo: project.idNo,
+              url: config.url,
+              ticket_url: config.url + '/buyer/ticket/?redirect=true',
+              logo: config.url + '/assets/images/logo.svg',
+              toc: config.url + '/toc',
+              privacy: config.url + '/privacy'
+            },
+            emailsConfig.noQuoteSubmitted,
+            '',
+            'Project ' + project.idNo + ': No Activity After 72 Hours'
           );
-        const { h, m } = timeLeftAsQuoteDeliveredStage;
-        const update = {
-          uptimeAsQuoteDeliveredStage: timeSpent,
-          timeLeftAsQuoteDeliveredStage
-        };
-
-        if (h === 0 && m === 0) {
-          if (
-            !project.salesTeamNotifiedAboutQuoteDeliveredStage &&
-            project.findSpaceUserId
-          ) {
-            sender.sendTemplateEmail(
-              'quoteDeliveredandnoActivityAfter72Hours',
-              {
-                email: project.findSpaceUserId.businessEmail,
-                name: project.findSpaceUserId.firstName,
-                idNo: project.idNo,
-                url: config.url,
-                ticket_url: config.url + '/buyer/ticket/?redirect=true',
-                logo: config.url + '/assets/images/logo.svg',
-                toc: config.url + '/toc',
-                privacy: config.url + '/privacy'
-              },
-              emailsConfig.noQuoteSubmitted,
-              '',
-              'Project ' + project.idNo + ': No Activity After 72 Hours'
-            );
-          }
-          update.salesTeamNotifiedAboutQuoteDeliveredStage = true;
         }
+        update.salesTeamNotifiedAboutQuoteDeliveredStage = true;
+      }
 
-        return Project.updateOne({ _id: project._id }, { $set: update });
-      })
-    );
+      return Project.updateOne({ _id: project._id }, { $set: update });
+    });
   }
 
   // ─────────────────────────────────────────────
@@ -410,49 +409,44 @@ module.exports = (ctx) => {
   async function processWarehouseSelectedProjects(projects) {
     if (!projects.length) return;
 
-    await Promise.all(
-      projects.map(async (project) => {
-        const timeSpent = project.uptimeAsWarehouseSelectedStage + 60;
-        const timeLeftAsWarehouseSelectedStage =
-          timeConverter.convertSecondsIntoTimeLeftNonResponsiveStages(
-            timeSpent,
-            86400
+    await processInChunks(projects, CHUNK_SIZE, async (project) => {
+      const timeSpent = project.uptimeAsWarehouseSelectedStage + 60;
+      const timeLeftAsWarehouseSelectedStage =
+        timeConverter.convertSecondsIntoTimeLeftNonResponsiveStages(
+          timeSpent,
+          86400
+        );
+      const { h, m } = timeLeftAsWarehouseSelectedStage;
+      const update = {
+        uptimeAsWarehouseSelectedStage: timeSpent,
+        timeLeftAsWarehouseSelectedStage
+      };
+
+      if (h === 0 && m === 0) {
+        const provider =
+          project.quote_accepted && project.quote_accepted.listSpaceUserId;
+        if (!project.salesTeamNotifiedAboutWarehouseSelectedStage && provider) {
+          sender.sendTemplateEmail(
+            'warehouseSelectedAndnoActivityfor72Hours',
+            {
+              email: provider.businessEmail,
+              idNo: project.idNo,
+              url: config.url,
+              ticket_url: config.url + '/buyer/ticket/?redirect=true',
+              logo: config.url + '/assets/images/logo.svg',
+              toc: config.url + '/toc',
+              privacy: config.url + '/privacy'
+            },
+            emailsConfig.noQuoteSubmitted,
+            '',
+            'Project ' + project.idNo + ': No Contract Received From Howzer'
           );
-        const { h, m } = timeLeftAsWarehouseSelectedStage;
-        const update = {
-          uptimeAsWarehouseSelectedStage: timeSpent,
-          timeLeftAsWarehouseSelectedStage
-        };
-
-        if (h === 0 && m === 0) {
-          const provider =
-            project.quote_accepted && project.quote_accepted.listSpaceUserId;
-          if (
-            !project.salesTeamNotifiedAboutWarehouseSelectedStage &&
-            provider
-          ) {
-            sender.sendTemplateEmail(
-              'warehouseSelectedAndnoActivityfor72Hours',
-              {
-                email: provider.businessEmail,
-                idNo: project.idNo,
-                url: config.url,
-                ticket_url: config.url + '/buyer/ticket/?redirect=true',
-                logo: config.url + '/assets/images/logo.svg',
-                toc: config.url + '/toc',
-                privacy: config.url + '/privacy'
-              },
-              emailsConfig.noQuoteSubmitted,
-              '',
-              'Project ' + project.idNo + ': No Contract Received From Howzer'
-            );
-          }
-          update.salesTeamNotifiedAboutWarehouseSelectedStage = true;
         }
+        update.salesTeamNotifiedAboutWarehouseSelectedStage = true;
+      }
 
-        return Project.updateOne({ _id: project._id }, { $set: update });
-      })
-    );
+      return Project.updateOne({ _id: project._id }, { $set: update });
+    });
   }
 
   // ─────────────────────────────────────────────
@@ -503,15 +497,13 @@ module.exports = (ctx) => {
 
     if (!toNotify.length) return;
 
-    await Promise.all(
-      toNotify.map(async (project) => {
-        // email send is commented out in original — preserving that intent
-        return Project.updateOne(
-          { _id: project._id },
-          { $set: { howzerToBeNotifiedAboutInvoiceEmail: true } }
-        );
-      })
-    );
+    await processInChunks(toNotify, CHUNK_SIZE, async (project) => {
+      // email send is commented out in original — preserving that intent
+      return Project.updateOne(
+        { _id: project._id },
+        { $set: { howzerToBeNotifiedAboutInvoiceEmail: true } }
+      );
+    });
   }
 
   return {

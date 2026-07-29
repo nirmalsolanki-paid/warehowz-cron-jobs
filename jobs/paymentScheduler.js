@@ -71,20 +71,24 @@ module.exports = (ctx) => {
         };
         async.series(
           [
-            (cb) => {
-              Invoice.find({
-                delete: false,
-                status: 'Payment Succeeded'
-              }).exec((err, invoices) => {
-                if (err) {
-                  cb(err);
-
-                  return;
-                }
-                allInvoices = invoices;
-                cb();
-              });
-            },
+            // Unused: allInvoices is only ever read by the commented-out
+            // step further below, so this query loaded every
+            // "Payment Succeeded" invoice in the system's history (no date
+            // bound) into memory every day for no purpose.
+            // (cb) => {
+            //   Invoice.find({
+            //     delete: false,
+            //     status: 'Payment Succeeded'
+            //   }).exec((err, invoices) => {
+            //     if (err) {
+            //       cb(err);
+            //
+            //       return;
+            //     }
+            //     allInvoices = invoices;
+            //     cb();
+            //   });
+            // },
             (cb) => {
               Invoice.find({
                 delete: false,
