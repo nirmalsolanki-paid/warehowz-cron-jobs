@@ -79,7 +79,9 @@ module.exports = (ctx) => {
 
                           if (transaction.invoice) {
                             Invoice.findOne({ _id: transaction.invoice })
-                              .populate('findSpaceUserId listSpaceUserId project')
+                              .populate(
+                                'findSpaceUserId listSpaceUserId project'
+                              )
                               .exec((err, invoice) => {
                                 if (err) {
                                   callback(err);
@@ -87,18 +89,19 @@ module.exports = (ctx) => {
                                   return;
                                 }
                                 if (invoice) {
+                                  const invoiceUpdate = {};
                                   if (transaction.status == 'failed') {
-                                    invoice.paymentStatus = `${res.status} [${res.failure_code}]`;
-                                    invoice.status = 'Payment Failed';
-                                    invoice.ticketGeneratedAutomaticallyForFailed = false;
+                                    invoiceUpdate.paymentStatus = `${res.status} [${res.failure_code}]`;
+                                    invoiceUpdate.status = 'Payment Failed';
+                                    invoiceUpdate.ticketGeneratedAutomaticallyForFailed = false;
                                     const operatorsBuyer =
                                       invoice.findSpaceUserId.additionalEmail
                                         .filter(
                                           (userObj) =>
                                             userObj.role.toLowerCase() ===
                                               'operator' &&
-                                            userObj.notificationRoles
-                                              .length == 0
+                                            userObj.notificationRoles.length ==
+                                              0
                                         )
                                         .map((userObj) => userObj.email);
                                     const notificationOperatorsBuyer =
@@ -144,7 +147,9 @@ module.exports = (ctx) => {
                                       invoiceNumber: invoice.globalInvoiceNumber
                                         ? invoice.globalInvoiceNumber
                                         : '0000',
-                                      projectNumber: invoice.project.idNo,
+                                      projectNumber: invoice.project
+                                        ? invoice.project.idNo
+                                        : 'N/A',
                                       url: config.url,
                                       logo:
                                         config.url + '/assets/images/logo.svg',
@@ -155,8 +160,7 @@ module.exports = (ctx) => {
                                         '/buyer/all-invoices/' +
                                         invoice._id +
                                         buildContinuityAuthQuery(
-                                          invoice.findSpaceUserId
-                                            .businessEmail,
+                                          invoice.findSpaceUserId.businessEmail,
                                           invoice._id
                                         ),
                                       continuity_text: 'View Invoice',
@@ -180,25 +184,28 @@ module.exports = (ctx) => {
                                     );
                                   } else {
                                     if (res.status == 'succeeded') {
-                                      invoice.status = 'Payment Succeeded';
-                                      invoice.paymentSucceededOn = new Date();
+                                      invoiceUpdate.status =
+                                        'Payment Succeeded';
+                                      invoiceUpdate.paymentSucceededOn =
+                                        new Date();
                                       const buyerLocals = {
                                         name: invoice.findSpaceUserId
-                                          ? invoice.findSpaceUserId
-                                              .firstName +
+                                          ? invoice.findSpaceUserId.firstName +
                                             ' ' +
                                             invoice.findSpaceUserId.lastName
                                           : '',
                                         providerName: invoice.listSpaceUserId
-                                          ? invoice.listSpaceUserId
-                                              .firstName +
+                                          ? invoice.listSpaceUserId.firstName +
                                             ' ' +
                                             invoice.listSpaceUserId.lastName
                                           : '',
-                                        invoiceNumber: invoice.globalInvoiceNumber
-                                          ? invoice.globalInvoiceNumber
-                                          : '0000',
-                                        projectNumber: invoice.project.idNo,
+                                        invoiceNumber:
+                                          invoice.globalInvoiceNumber
+                                            ? invoice.globalInvoiceNumber
+                                            : '0000',
+                                        projectNumber: invoice.project
+                                          ? invoice.project.idNo
+                                          : 'N/A',
                                         url: config.url,
                                         logo:
                                           config.url +
@@ -232,8 +239,7 @@ module.exports = (ctx) => {
                                       const notificationOperators =
                                         invoice.listSpaceUserId.additionalEmail
                                           .filter((userObj) =>
-                                            userObj.notificationRoles.length >
-                                            0
+                                            userObj.notificationRoles.length > 0
                                               ? userObj.notificationRoles.includes(
                                                   'Operator'
                                                 )
@@ -243,8 +249,7 @@ module.exports = (ctx) => {
                                       const invoicing =
                                         invoice.listSpaceUserId.additionalEmail
                                           .filter((userObj) =>
-                                            userObj.notificationRoles.length >
-                                            0
+                                            userObj.notificationRoles.length > 0
                                               ? userObj.notificationRoles.includes(
                                                   'Invoicing'
                                                 )
@@ -272,8 +277,7 @@ module.exports = (ctx) => {
                                       const notificationOperatorsBuyer =
                                         invoice.findSpaceUserId.additionalEmail
                                           .filter((userObj) =>
-                                            userObj.notificationRoles.length >
-                                            0
+                                            userObj.notificationRoles.length > 0
                                               ? userObj.notificationRoles.includes(
                                                   'Operator'
                                                 )
@@ -283,8 +287,7 @@ module.exports = (ctx) => {
                                       const invoicingBuyer =
                                         invoice.findSpaceUserId.additionalEmail
                                           .filter((userObj) =>
-                                            userObj.notificationRoles.length >
-                                            0
+                                            userObj.notificationRoles.length > 0
                                               ? userObj.notificationRoles.includes(
                                                   'Invoicing'
                                                 )
@@ -302,24 +305,24 @@ module.exports = (ctx) => {
 
                                       const providerLocals = {
                                         name: invoice.listSpaceUserId
-                                          ? invoice.listSpaceUserId
-                                              .firstName +
+                                          ? invoice.listSpaceUserId.firstName +
                                             ' ' +
                                             invoice.listSpaceUserId.lastName
                                           : '',
-                                        invoiceNumber: invoice.globalInvoiceNumber
-                                          ? invoice.globalInvoiceNumber
-                                          : '0000',
+                                        invoiceNumber:
+                                          invoice.globalInvoiceNumber
+                                            ? invoice.globalInvoiceNumber
+                                            : '0000',
                                         buyername: invoice.findSpaceUserId
-                                          ? invoice.findSpaceUserId
-                                              .firstName +
+                                          ? invoice.findSpaceUserId.firstName +
                                             ' ' +
                                             invoice.findSpaceUserId.lastName
                                           : '',
-                                        projectNumber: invoice.project.idNo,
+                                        projectNumber: invoice.project
+                                          ? invoice.project.idNo
+                                          : 'N/A',
                                         email:
-                                          invoice.listSpaceUserId
-                                            .businessEmail,
+                                          invoice.listSpaceUserId.businessEmail,
                                         url: config.url,
                                         logo:
                                           config.url +
@@ -367,10 +370,18 @@ module.exports = (ctx) => {
                                         'Invoice has been cleared successfully'
                                       );
                                     }
-                                    invoice.paymentStatus = res.status;
+                                    invoiceUpdate.paymentStatus = res.status;
                                   }
 
-                                  invoice.save(callback);
+                                  // updateOne (not .save()) — avoids Mongoose's
+                                  // full-document dirty-path scan, which can
+                                  // stack-overflow on documents with large
+                                  // array fields.
+                                  Invoice.updateOne(
+                                    { _id: invoice._id },
+                                    { $set: invoiceUpdate },
+                                    callback
+                                  );
                                 } else {
                                   callback();
                                 }

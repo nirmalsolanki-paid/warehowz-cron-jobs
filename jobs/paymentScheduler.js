@@ -115,12 +115,22 @@ module.exports = (ctx) => {
                     }
                     //daysSinceFailed=3; // To Change (done)
                     if (daysSinceFailed >= 3) {
-                      invoice.failedHistory.reSubmittedDate = new Date();
-                      invoice.failedHistory.reSubmitted = true;
-                      invoice.status = 'Released';
-                      invoice.ticketGeneratedAutomaticallyForFailed = false;
-                      invoice.paymentDue = new Date();
-                      invoice.save(callback);
+                      // updateOne (not .save()) — avoids Mongoose's full-document
+                      // dirty-path scan, which can stack-overflow on documents
+                      // with large array fields (e.g. processDates).
+                      Invoice.updateOne(
+                        { _id: invoice._id },
+                        {
+                          $set: {
+                            'failedHistory.reSubmittedDate': new Date(),
+                            'failedHistory.reSubmitted': true,
+                            status: 'Released',
+                            ticketGeneratedAutomaticallyForFailed: false,
+                            paymentDue: new Date()
+                          }
+                        },
+                        callback
+                      );
                     } else {
                       callback();
                     }
@@ -276,9 +286,14 @@ module.exports = (ctx) => {
                           }
                           const cardPendingVerification =
                             card &&
-                            (card.type === 'bank_account' || card.type === 'ach') &&
+                            (card.type === 'bank_account' ||
+                              card.type === 'ach') &&
                             card.status !== 'Verified';
-                          if (card && !card.delete && !cardPendingVerification) {
+                          if (
+                            card &&
+                            !card.delete &&
+                            !cardPendingVerification
+                          ) {
                             let creditCardCharge = '';
 
                             var per = (10 / 100) * invoice.due;
@@ -321,6 +336,11 @@ module.exports = (ctx) => {
                                   invoice.globalInvoiceNumber || '';
 
                                 const _isCard = card.type === 'card';
+                                console.log(
+                                  `[PaymentScheduler] Charging invoice ${invoice.globalInvoiceNumber || invoice._id}: ` +
+                                    `amount=${_chargeAmount} fee=${_feeAmount} currency=usd customer=${card.customerId} ` +
+                                    `paymentMethod=${card.paymentMethodId} type=${_isCard ? 'card' : 'us_bank_account'}`
+                                );
                                 const _chargePromise = stripe.paymentIntents
                                   .create({
                                     amount: _chargeAmount,
@@ -374,7 +394,8 @@ module.exports = (ctx) => {
                                     transaction.findSpaceUserId =
                                       invoice.findSpaceUserId;
                                     transaction.amount = charge.amount;
-                                    transaction.refunded = charge.amount_refunded;
+                                    transaction.refunded =
+                                      charge.amount_refunded;
                                     transaction.customerId = charge.customer;
                                     transaction.balance_transaction =
                                       charge.balance_transaction;
@@ -393,252 +414,321 @@ module.exports = (ctx) => {
 
                                         return;
                                       }
-                                      let buyerEmailTemplate = 'invoice_succeeded';
+                                      let buyerEmailTemplate =
+                                        'invoice_succeeded';
                                       let providerEmailTemplate =
                                         'invoice_succeeded_howzer';
                                       let emailSubject =
                                         'Invoice has been cleared successfully';
 
+                                      const invoiceUpdate = {
+                                        paymentStatus: transaction.status
+                                      };
                                       if (transaction.status == 'pending') {
-                                        invoice.status = 'Pending';
+                                        invoiceUpdate.status = 'Pending';
                                         buyerEmailTemplate =
                                           'invoice_under_processing';
                                         providerEmailTemplate =
                                           'invoice_under_processing';
                                         emailSubject = `The invoice #${invoice.globalInvoiceNumber} is under processing`;
                                       } else {
-                                        invoice.status = 'Payment Succeeded';
-                                        invoice.paymentSucceededOn = new Date();
+                                        invoiceUpdate.status =
+                                          'Payment Succeeded';
+                                        invoiceUpdate.paymentSucceededOn =
+                                          new Date();
                                       }
-                                      invoice.paymentStatus = transaction.status;
 
-                                      invoice.processDates.push(new Date());
-                                      const operatorsBuyer =
-                                        invoice.findSpaceUserId.additionalEmail
-                                          .filter(
-                                            (userObj) =>
-                                              userObj.role.toLowerCase() ===
-                                                'operator' &&
-                                              userObj.notificationRoles.length == 0
-                                          )
-                                          .map((userObj) => userObj.email);
-                                      const notificationOperatorsBuyer =
-                                        invoice.findSpaceUserId.additionalEmail
-                                          .filter((userObj) =>
-                                            userObj.notificationRoles.length > 0
-                                              ? userObj.notificationRoles.includes(
-                                                  'Operator'
+                                      // Mark the invoice paid FIRST, before any
+                                      // email-building code runs below — so a
+                                      // bug in that (larger, more failure-prone)
+                                      // logic can never again leave a
+                                      // successfully-charged invoice looking
+                                      // unpaid, which is what causes it to get
+                                      // charged a second time on the next run.
+                                      Invoice.updateOne(
+                                        { _id: invoice._id },
+                                        {
+                                          $set: invoiceUpdate,
+                                          $push: { processDates: new Date() }
+                                        },
+                                        (updateErr) => {
+                                          if (updateErr) {
+                                            callback(updateErr);
+
+                                            return;
+                                          }
+
+                                          try {
+                                            const operatorsBuyer =
+                                              invoice.findSpaceUserId.additionalEmail
+                                                .filter(
+                                                  (userObj) =>
+                                                    userObj.role.toLowerCase() ===
+                                                      'operator' &&
+                                                    userObj.notificationRoles
+                                                      .length == 0
                                                 )
-                                              : false
-                                          )
-                                          .map((userObj) => userObj.email);
-                                      const invoicingBuyer =
-                                        invoice.findSpaceUserId.additionalEmail
-                                          .filter((userObj) =>
-                                            userObj.notificationRoles.length > 0
-                                              ? userObj.notificationRoles.includes(
-                                                  'Invoicing'
+                                                .map(
+                                                  (userObj) => userObj.email
+                                                );
+                                            const notificationOperatorsBuyer =
+                                              invoice.findSpaceUserId.additionalEmail
+                                                .filter((userObj) =>
+                                                  userObj.notificationRoles
+                                                    .length > 0
+                                                    ? userObj.notificationRoles.includes(
+                                                        'Operator'
+                                                      )
+                                                    : false
                                                 )
-                                              : false
-                                          )
-                                          .map((userObj) => userObj.email);
-                                      const adminBuyer =
-                                        invoice.findSpaceUserId.additionalEmail
-                                          .filter(
-                                            (userObj) =>
-                                              userObj.role.toLowerCase() === 'admin'
-                                          )
-                                          .map((userObj) => userObj.email);
+                                                .map(
+                                                  (userObj) => userObj.email
+                                                );
+                                            const invoicingBuyer =
+                                              invoice.findSpaceUserId.additionalEmail
+                                                .filter((userObj) =>
+                                                  userObj.notificationRoles
+                                                    .length > 0
+                                                    ? userObj.notificationRoles.includes(
+                                                        'Invoicing'
+                                                      )
+                                                    : false
+                                                )
+                                                .map(
+                                                  (userObj) => userObj.email
+                                                );
+                                            const adminBuyer =
+                                              invoice.findSpaceUserId.additionalEmail
+                                                .filter(
+                                                  (userObj) =>
+                                                    userObj.role.toLowerCase() ===
+                                                    'admin'
+                                                )
+                                                .map(
+                                                  (userObj) => userObj.email
+                                                );
 
-                                      const buyerLocals = {
-                                        name: invoice.findSpaceUserId
-                                          ? invoice.findSpaceUserId.firstName +
-                                            ' ' +
-                                            invoice.findSpaceUserId.lastName
-                                          : '',
-                                        providerName: invoice.listSpaceUserId
-                                          ? invoice.listSpaceUserId.firstName +
-                                            ' ' +
-                                            invoice.listSpaceUserId.lastName
-                                          : '',
-                                        invoiceNumber: invoice.globalInvoiceNumber
-                                          ? invoice.globalInvoiceNumber
-                                          : '0000',
-                                        projectNumber: invoice.project.idNo,
-                                        url: config.url,
-                                        logo:
-                                          config.url + '/assets/images/logo.svg',
-                                        toc: config.url + '/toc',
-                                        privacy: config.url + '/privacy',
-                                        continuity_url:
-                                          config.url +
-                                          '/buyer/all-invoices/' +
-                                          invoice._id +
-                                          buildContinuityAuthQuery(
-                                            invoice.findSpaceUserId.businessEmail,
-                                            invoice._id
-                                          ),
-                                        continuity_text: 'View Invoice',
-                                        ticket_url:
-                                          config.url +
-                                          `/buyer/ticket/?redirect=true`
-                                      };
+                                            const buyerLocals = {
+                                              name: invoice.findSpaceUserId
+                                                ? invoice.findSpaceUserId
+                                                    .firstName +
+                                                  ' ' +
+                                                  invoice.findSpaceUserId
+                                                    .lastName
+                                                : '',
+                                              providerName:
+                                                invoice.listSpaceUserId
+                                                  ? invoice.listSpaceUserId
+                                                      .firstName +
+                                                    ' ' +
+                                                    invoice.listSpaceUserId
+                                                      .lastName
+                                                  : '',
+                                              invoiceNumber:
+                                                invoice.globalInvoiceNumber
+                                                  ? invoice.globalInvoiceNumber
+                                                  : '0000',
+                                              projectNumber: invoice.project
+                                                ? invoice.project.idNo
+                                                : 'N/A',
+                                              url: config.url,
+                                              logo:
+                                                config.url +
+                                                '/assets/images/logo.svg',
+                                              toc: config.url + '/toc',
+                                              privacy: config.url + '/privacy',
+                                              continuity_url:
+                                                config.url +
+                                                '/buyer/all-invoices/' +
+                                                invoice._id +
+                                                buildContinuityAuthQuery(
+                                                  invoice.findSpaceUserId
+                                                    .businessEmail,
+                                                  invoice._id
+                                                ),
+                                              continuity_text: 'View Invoice',
+                                              ticket_url:
+                                                config.url +
+                                                `/buyer/ticket/?redirect=true`
+                                            };
 
-                                      // let providerLocals = {
-                                      //   name:  invoice.listSpaceUserId ? (invoice.listSpaceUserId.firstName + " " + invoice.listSpaceUserId.lastName) :'',
-                                      //   invoiceNumber:  invoice.globalInvoiceNumber ?  invoice.globalInvoiceNumber: '0000',
-                                      //   project: invoice.project.idNo,
-                                      //   email: invoice.findSpaceUserId.businessEmail,
-                                      //   url: config.url,
-                                      //   logo: config.url + '/assets/images/logo.svg',
-                                      //   toc: config.url + '/toc',
-                                      //   privacy: config.url + '/privacy',
-                                      // };
-                                      // To stop all notifications for end users (resumed later)
-                                      sender.sendTemplateEmail(
-                                        buyerEmailTemplate,
-                                        buyerLocals,
-                                        invoice.findSpaceUserId.businessEmail,
-                                        [
-                                          ...operatorsBuyer,
-                                          ...notificationOperatorsBuyer,
-                                          ...invoicingBuyer,
-                                          ...adminBuyer
-                                        ],
-                                        emailSubject
+                                            // To stop all notifications for end users (resumed later)
+                                            sender.sendTemplateEmail(
+                                              buyerEmailTemplate,
+                                              buyerLocals,
+                                              invoice.findSpaceUserId
+                                                .businessEmail,
+                                              [
+                                                ...operatorsBuyer,
+                                                ...notificationOperatorsBuyer,
+                                                ...invoicingBuyer,
+                                                ...adminBuyer
+                                              ],
+                                              emailSubject
+                                            );
+                                            const operators =
+                                              invoice.listSpaceUserId.additionalEmail
+                                                .filter(
+                                                  (userObj) =>
+                                                    userObj.role.toLowerCase() ===
+                                                      'operator' &&
+                                                    userObj.notificationRoles
+                                                      .length == 0
+                                                )
+                                                .map(
+                                                  (userObj) => userObj.email
+                                                );
+                                            const notificationOperators =
+                                              invoice.listSpaceUserId.additionalEmail
+                                                .filter((userObj) =>
+                                                  userObj.notificationRoles
+                                                    .length > 0
+                                                    ? userObj.notificationRoles.includes(
+                                                        'Operator'
+                                                      )
+                                                    : false
+                                                )
+                                                .map(
+                                                  (userObj) => userObj.email
+                                                );
+                                            const invoicing =
+                                              invoice.listSpaceUserId.additionalEmail
+                                                .filter((userObj) =>
+                                                  userObj.notificationRoles
+                                                    .length > 0
+                                                    ? userObj.notificationRoles.includes(
+                                                        'Invoicing'
+                                                      )
+                                                    : false
+                                                )
+                                                .map(
+                                                  (userObj) => userObj.email
+                                                );
+                                            const admin =
+                                              invoice.listSpaceUserId.additionalEmail
+                                                .filter(
+                                                  (userObj) =>
+                                                    userObj.role.toLowerCase() ===
+                                                    'admin'
+                                                )
+                                                .map(
+                                                  (userObj) => userObj.email
+                                                );
+
+                                            const providerLocals = {
+                                              name: invoice.listSpaceUserId
+                                                ? invoice.listSpaceUserId
+                                                    .firstName +
+                                                  ' ' +
+                                                  invoice.listSpaceUserId
+                                                    .lastName
+                                                : '',
+                                              invoiceNumber:
+                                                invoice.globalInvoiceNumber
+                                                  ? invoice.globalInvoiceNumber
+                                                  : '0000',
+                                              buyername: invoice.findSpaceUserId
+                                                ? invoice.findSpaceUserId
+                                                    .firstName +
+                                                  ' ' +
+                                                  invoice.findSpaceUserId
+                                                    .lastName
+                                                : '',
+                                              projectNumber: invoice.project
+                                                ? invoice.project.idNo
+                                                : 'N/A',
+                                              email:
+                                                invoice.listSpaceUserId
+                                                  .businessEmail,
+                                              url: config.url,
+                                              logo:
+                                                config.url +
+                                                '/assets/images/logo.svg',
+                                              toc: config.url + '/toc',
+                                              privacy: config.url + '/privacy',
+                                              continuity_url:
+                                                config.url +
+                                                '/provider/all-invoices/' +
+                                                invoice._id +
+                                                buildContinuityAuthQuery(
+                                                  invoice.listSpaceUserId
+                                                    .businessEmail,
+                                                  invoice._id
+                                                ),
+                                              continuity_text: 'View Invoice',
+                                              ticket_url:
+                                                config.url +
+                                                `/provider/ticket/?redirect=true`
+                                            };
+                                            // To stop all notifications for end users (resumed later)
+                                            sender.sendTemplateEmail(
+                                              providerEmailTemplate,
+                                              providerLocals,
+                                              invoice.listSpaceUserId
+                                                .businessEmail,
+                                              [
+                                                ...operators,
+                                                ...notificationOperators,
+                                                ...invoicing,
+                                                ...admin
+                                              ],
+                                              emailSubject
+                                            );
+                                          } catch (emailErr) {
+                                            console.error(
+                                              '[PaymentScheduler] Non-fatal error sending success emails:',
+                                              emailErr.message
+                                            );
+                                          }
+
+                                          callback();
+                                        }
                                       );
-                                      const operators =
-                                        invoice.listSpaceUserId.additionalEmail
-                                          .filter(
-                                            (userObj) =>
-                                              userObj.role.toLowerCase() ===
-                                                'operator' &&
-                                              userObj.notificationRoles.length == 0
-                                          )
-                                          .map((userObj) => userObj.email);
-                                      const notificationOperators =
-                                        invoice.listSpaceUserId.additionalEmail
-                                          .filter((userObj) =>
-                                            userObj.notificationRoles.length > 0
-                                              ? userObj.notificationRoles.includes(
-                                                  'Operator'
-                                                )
-                                              : false
-                                          )
-                                          .map((userObj) => userObj.email);
-                                      const invoicing =
-                                        invoice.listSpaceUserId.additionalEmail
-                                          .filter((userObj) =>
-                                            userObj.notificationRoles.length > 0
-                                              ? userObj.notificationRoles.includes(
-                                                  'Invoicing'
-                                                )
-                                              : false
-                                          )
-                                          .map((userObj) => userObj.email);
-                                      const admin =
-                                        invoice.listSpaceUserId.additionalEmail
-                                          .filter(
-                                            (userObj) =>
-                                              userObj.role.toLowerCase() === 'admin'
-                                          )
-                                          .map((userObj) => userObj.email);
-
-                                      const providerLocals = {
-                                        name: invoice.listSpaceUserId
-                                          ? invoice.listSpaceUserId.firstName +
-                                            ' ' +
-                                            invoice.listSpaceUserId.lastName
-                                          : '',
-                                        invoiceNumber: invoice.globalInvoiceNumber
-                                          ? invoice.globalInvoiceNumber
-                                          : '0000',
-                                        buyername: invoice.findSpaceUserId
-                                          ? invoice.findSpaceUserId.firstName +
-                                            ' ' +
-                                            invoice.findSpaceUserId.lastName
-                                          : '',
-                                        projectNumber: invoice.project.idNo,
-                                        email:
-                                          invoice.listSpaceUserId.businessEmail,
-                                        url: config.url,
-                                        logo:
-                                          config.url + '/assets/images/logo.svg',
-                                        toc: config.url + '/toc',
-                                        privacy: config.url + '/privacy',
-                                        continuity_url:
-                                          config.url +
-                                          '/provider/all-invoices/' +
-                                          invoice._id +
-                                          buildContinuityAuthQuery(
-                                            invoice.listSpaceUserId.businessEmail,
-                                            invoice._id
-                                          ),
-                                        continuity_text: 'View Invoice',
-                                        ticket_url:
-                                          config.url +
-                                          `/provider/ticket/?redirect=true`
-                                      };
-                                      // To stop all notifications for end users (resumed later)
-                                      sender.sendTemplateEmail(
-                                        providerEmailTemplate,
-                                        providerLocals,
-                                        invoice.listSpaceUserId.businessEmail,
-                                        [
-                                          ...operators,
-                                          ...notificationOperators,
-                                          ...invoicing,
-                                          ...admin
-                                        ],
-                                        emailSubject
-                                      );
-                                      invoice.save(callback);
                                     });
                                   })
                                   .catch((err) => {
                                     logFunction(invoice, err, (error, log) => {
-                                      invoice.failedHistory.date =
+                                      const failedHistoryDate =
                                         invoice.failedHistory.date == null
                                           ? Date.now()
                                           : invoice.failedHistory.date;
                                       const report = {
-                                        Invoice_Number: invoice.globalInvoiceNumber
-                                          ? invoice.globalInvoiceNumber
-                                          : '0000',
+                                        Invoice_Number:
+                                          invoice.globalInvoiceNumber
+                                            ? invoice.globalInvoiceNumber
+                                            : '0000',
                                         If_failed_payment_resubmitted:
-                                          invoice.failedHistory.reSubmitted == false
+                                          invoice.failedHistory.reSubmitted ==
+                                          false
                                             ? 'No'
                                             : 'Yes',
-                                        Days_since_failure:
-                                          invoice.failedHistory.date == null
-                                            ? 0
-                                            : moment(new Date()).diff(
-                                                moment(
-                                                  new Date(
-                                                    invoice.failedHistory.date
-                                                  )
-                                                ),
-                                                'days'
-                                              )
+                                        Days_since_failure: moment(
+                                          new Date()
+                                        ).diff(
+                                          moment(new Date(failedHistoryDate)),
+                                          'days'
+                                        )
                                       };
                                       dailyFailedPaymentReport.push(report);
-                                      invoice.status = 'Payment Failed';
-                                      invoice.ticketGeneratedAutomaticallyForFailed = false;
-                                      invoice.paymentStatus = err.raw.code;
-                                      invoice.processDates.push(new Date());
-                                      invoice.failedHistory.reSubmitted =
-                                        invoice.failedHistory.date == null
-                                          ? invoice.failedHistory.reSubmitted
-                                          : true;
-                                      invoice.failedHistory.failedCount =
+                                      const newFailedCount =
                                         invoice.failedHistory.failedCount + 1;
+                                      const invoiceUpdate = {
+                                        status: 'Payment Failed',
+                                        ticketGeneratedAutomaticallyForFailed: false,
+                                        paymentStatus: err.raw.code,
+                                        'failedHistory.date': failedHistoryDate,
+                                        'failedHistory.reSubmitted': true,
+                                        'failedHistory.failedCount':
+                                          newFailedCount
+                                      };
                                       const operatorsBuyer =
                                         invoice.findSpaceUserId.additionalEmail
                                           .filter(
                                             (userObj) =>
                                               userObj.role.toLowerCase() ===
                                                 'operator' &&
-                                              userObj.notificationRoles.length == 0
+                                              userObj.notificationRoles
+                                                .length == 0
                                           )
                                           .map((userObj) => userObj.email);
                                       const notificationOperatorsBuyer =
@@ -665,7 +755,8 @@ module.exports = (ctx) => {
                                         invoice.findSpaceUserId.additionalEmail
                                           .filter(
                                             (userObj) =>
-                                              userObj.role.toLowerCase() === 'admin'
+                                              userObj.role.toLowerCase() ===
+                                              'admin'
                                           )
                                           .map((userObj) => userObj.email);
 
@@ -680,13 +771,17 @@ module.exports = (ctx) => {
                                             ' ' +
                                             invoice.listSpaceUserId.lastName
                                           : '',
-                                        invoiceNumber: invoice.globalInvoiceNumber
-                                          ? invoice.globalInvoiceNumber
-                                          : '0000',
-                                        projectNumber: invoice.project.idNo,
+                                        invoiceNumber:
+                                          invoice.globalInvoiceNumber
+                                            ? invoice.globalInvoiceNumber
+                                            : '0000',
+                                        projectNumber: invoice.project
+                                          ? invoice.project.idNo
+                                          : 'N/A',
                                         url: config.url,
                                         logo:
-                                          config.url + '/assets/images/logo.svg',
+                                          config.url +
+                                          '/assets/images/logo.svg',
                                         toc: config.url + '/toc',
                                         privacy: config.url + '/privacy',
                                         continuity_url:
@@ -694,7 +789,8 @@ module.exports = (ctx) => {
                                           '/buyer/all-invoices/' +
                                           invoice._id +
                                           buildContinuityAuthQuery(
-                                            invoice.findSpaceUserId.businessEmail,
+                                            invoice.findSpaceUserId
+                                              .businessEmail,
                                             invoice._id
                                           ),
                                         continuity_text: 'View Invoice',
@@ -713,13 +809,17 @@ module.exports = (ctx) => {
                                             ' ' +
                                             invoice.listSpaceUserId.lastName
                                           : '',
-                                        invoiceNumber: invoice.globalInvoiceNumber
-                                          ? invoice.globalInvoiceNumber
-                                          : '0000',
-                                        projectNumber: invoice.project.idNo,
+                                        invoiceNumber:
+                                          invoice.globalInvoiceNumber
+                                            ? invoice.globalInvoiceNumber
+                                            : '0000',
+                                        projectNumber: invoice.project
+                                          ? invoice.project.idNo
+                                          : 'N/A',
                                         url: config.url,
                                         logo:
-                                          config.url + '/assets/images/logo.svg',
+                                          config.url +
+                                          '/assets/images/logo.svg',
                                         toc: config.url + '/toc',
                                         privacy: config.url + '/privacy',
                                         continuity_url:
@@ -753,7 +853,7 @@ module.exports = (ctx) => {
                                       //   invoiceNumber: invoice.globalInvoiceNumber
                                       //     ? invoice.globalInvoiceNumber
                                       //     : '0000',
-                                      //   projectNumber: invoice.project.idNo,
+                                      //   projectNumber: invoice.project ? invoice.project.idNo : 'N/A',
                                       //   email:
                                       //     invoice.findSpaceUserId.businessEmail,
                                       //   url: config.url,
@@ -803,7 +903,7 @@ module.exports = (ctx) => {
                                         '',
                                         'Payment Failed'
                                       );
-                                      if (invoice.failedHistory.failedCount == 3) {
+                                      if (newFailedCount == 3) {
                                         sender.sendTemplateEmail(
                                           'invoice_failed_third_time_support',
                                           supportLocals,
@@ -813,15 +913,22 @@ module.exports = (ctx) => {
                                         );
                                       }
 
-                                      invoice.save((err) => {
-                                        callback(error);
+                                      Invoice.updateOne(
+                                        { _id: invoice._id },
+                                        {
+                                          $set: invoiceUpdate,
+                                          $push: { processDates: new Date() }
+                                        },
+                                        (err) => {
+                                          callback(error);
 
-                                        return;
-                                      });
+                                          return;
+                                        }
+                                      );
                                     });
                                   });
                               } else {
-                                invoice.failedHistory.date =
+                                const failedHistoryDate =
                                   invoice.failedHistory.date == null
                                     ? Date.now()
                                     : invoice.failedHistory.date;
@@ -833,33 +940,29 @@ module.exports = (ctx) => {
                                     invoice.failedHistory.reSubmitted == false
                                       ? 'No'
                                       : 'Yes',
-                                  Days_since_failure:
-                                    invoice.failedHistory.date == null
-                                      ? 0
-                                      : moment(new Date()).diff(
-                                          moment(
-                                            new Date(invoice.failedHistory.date)
-                                          ),
-                                          'days'
-                                        )
+                                  Days_since_failure: moment(new Date()).diff(
+                                    moment(new Date(failedHistoryDate)),
+                                    'days'
+                                  )
                                 };
                                 dailyFailedPaymentReport.push(report);
-                                invoice.paymentStatus =
-                                  'no stripe account found , Charge';
-                                invoice.status = 'Payment Failed';
-                                invoice.ticketGeneratedAutomaticallyForFailed = false;
-                                invoice.processDates.push(new Date());
-                                invoice.failedHistory.reSubmitted =
-                                  invoice.failedHistory.date == null
-                                    ? invoice.failedHistory.reSubmitted
-                                    : true;
-                                invoice.failedHistory.failedCount =
+                                const newFailedCount =
                                   invoice.failedHistory.failedCount + 1;
+                                const invoiceUpdate = {
+                                  paymentStatus:
+                                    'no stripe account found , Charge',
+                                  status: 'Payment Failed',
+                                  ticketGeneratedAutomaticallyForFailed: false,
+                                  'failedHistory.date': failedHistoryDate,
+                                  'failedHistory.reSubmitted': true,
+                                  'failedHistory.failedCount': newFailedCount
+                                };
                                 const operatorsBuyer =
                                   invoice.findSpaceUserId.additionalEmail
                                     .filter(
                                       (userObj) =>
-                                        userObj.role.toLowerCase() === 'operator' &&
+                                        userObj.role.toLowerCase() ===
+                                          'operator' &&
                                         userObj.notificationRoles.length == 0
                                     )
                                     .map((userObj) => userObj.email);
@@ -905,7 +1008,9 @@ module.exports = (ctx) => {
                                   invoiceNumber: invoice.globalInvoiceNumber
                                     ? invoice.globalInvoiceNumber
                                     : '0000',
-                                  projectNumber: invoice.project.idNo,
+                                  projectNumber: invoice.project
+                                    ? invoice.project.idNo
+                                    : 'N/A',
                                   url: config.url,
                                   logo: config.url + '/assets/images/logo.svg',
                                   toc: config.url + '/toc',
@@ -931,9 +1036,12 @@ module.exports = (ctx) => {
                                   accountType: 'Provider'
                                 };
 
-                                dataObjProvider = JSON.stringify(dataObjProvider);
+                                dataObjProvider =
+                                  JSON.stringify(dataObjProvider);
                                 const encodedDataProvider =
-                                  Buffer.from(dataObjProvider).toString('base64');
+                                  Buffer.from(dataObjProvider).toString(
+                                    'base64'
+                                  );
 
                                 // let providerLocals = {
                                 //   name: invoice.listSpaceUserId
@@ -944,7 +1052,7 @@ module.exports = (ctx) => {
                                 //   invoiceNumber: invoice.globalInvoiceNumber
                                 //     ? invoice.globalInvoiceNumber
                                 //     : '0000',
-                                //   projectNumber: invoice.project.idNo,
+                                //   projectNumber: invoice.project ? invoice.project.idNo : 'N/A',
                                 //   email: invoice.findSpaceUserId.businessEmail,
                                 //   url: config.url,
                                 //   logo: config.url + '/assets/images/logo.svg',
@@ -990,7 +1098,9 @@ module.exports = (ctx) => {
                                   invoiceNumber: invoice.globalInvoiceNumber
                                     ? invoice.globalInvoiceNumber
                                     : '0000',
-                                  projectNumber: invoice.project.idNo,
+                                  projectNumber: invoice.project
+                                    ? invoice.project.idNo
+                                    : 'N/A',
                                   url: config.url,
                                   logo: config.url + '/assets/images/logo.svg',
                                   toc: config.url + '/toc',
@@ -1001,7 +1111,7 @@ module.exports = (ctx) => {
                                     invoice._id,
                                   continuity_text: 'View Invoice'
                                 };
-                                if (invoice.failedHistory.failedCount == 3) {
+                                if (newFailedCount == 3) {
                                   sender.sendTemplateEmail(
                                     'invoice_failed_third_time_support',
                                     supportLocals,
@@ -1019,11 +1129,18 @@ module.exports = (ctx) => {
                                 //   'Payment Failed'
                                 // );
 
-                                invoice.save(callback);
+                                Invoice.updateOne(
+                                  { _id: invoice._id },
+                                  {
+                                    $set: invoiceUpdate,
+                                    $push: { processDates: new Date() }
+                                  },
+                                  callback
+                                );
                               }
                             });
                           } else {
-                            invoice.failedHistory.date =
+                            const failedHistoryDate =
                               invoice.failedHistory.date == null
                                 ? Date.now()
                                 : invoice.failedHistory.date;
@@ -1035,25 +1152,22 @@ module.exports = (ctx) => {
                                 invoice.failedHistory.reSubmitted == false
                                   ? 'No'
                                   : 'Yes',
-                              Days_since_failure:
-                                invoice.failedHistory.date == null
-                                  ? 0
-                                  : moment(new Date()).diff(
-                                      moment(new Date(invoice.failedHistory.date)),
-                                      'days'
-                                    )
+                              Days_since_failure: moment(new Date()).diff(
+                                moment(new Date(failedHistoryDate)),
+                                'days'
+                              )
                             };
                             dailyFailedPaymentReport.push(report);
-                            invoice.paymentStatus = 'no card found, Charge';
-                            invoice.status = 'Payment Failed';
-                            invoice.ticketGeneratedAutomaticallyForFailed = false;
-                            invoice.processDates.push(new Date());
-                            invoice.failedHistory.reSubmitted =
-                              invoice.failedHistory.date == null
-                                ? invoice.failedHistory.reSubmitted
-                                : true;
-                            invoice.failedHistory.failedCount =
+                            const newFailedCount =
                               invoice.failedHistory.failedCount + 1;
+                            const invoiceUpdate = {
+                              paymentStatus: 'no card found, Charge',
+                              status: 'Payment Failed',
+                              ticketGeneratedAutomaticallyForFailed: false,
+                              'failedHistory.date': failedHistoryDate,
+                              'failedHistory.reSubmitted': true,
+                              'failedHistory.failedCount': newFailedCount
+                            };
                             const operatorsBuyer =
                               invoice.findSpaceUserId.additionalEmail
                                 .filter(
@@ -1066,7 +1180,9 @@ module.exports = (ctx) => {
                               invoice.findSpaceUserId.additionalEmail
                                 .filter((userObj) =>
                                   userObj.notificationRoles.length > 0
-                                    ? userObj.notificationRoles.includes('Operator')
+                                    ? userObj.notificationRoles.includes(
+                                        'Operator'
+                                      )
                                     : false
                                 )
                                 .map((userObj) => userObj.email);
@@ -1102,7 +1218,9 @@ module.exports = (ctx) => {
                               invoiceNumber: invoice.globalInvoiceNumber
                                 ? invoice.globalInvoiceNumber
                                 : '0000',
-                              projectNumber: invoice.project.idNo,
+                              projectNumber: invoice.project
+                                ? invoice.project.idNo
+                                : 'N/A',
                               url: config.url,
                               logo: config.url + '/assets/images/logo.svg',
                               toc: config.url + '/toc',
@@ -1141,7 +1259,7 @@ module.exports = (ctx) => {
                             //   invoiceNumber: invoice.globalInvoiceNumber
                             //     ? invoice.globalInvoiceNumber
                             //     : '0000',
-                            //   projectNumber: invoice.project.idNo,
+                            //   projectNumber: invoice.project ? invoice.project.idNo : 'N/A',
                             //   email: invoice.findSpaceUserId.businessEmail,
                             //   url: config.url,
                             //   logo: config.url + '/assets/images/logo.svg',
@@ -1195,16 +1313,20 @@ module.exports = (ctx) => {
                               invoiceNumber: invoice.globalInvoiceNumber
                                 ? invoice.globalInvoiceNumber
                                 : '0000',
-                              projectNumber: invoice.project.idNo,
+                              projectNumber: invoice.project
+                                ? invoice.project.idNo
+                                : 'N/A',
                               url: config.url,
                               logo: config.url + '/assets/images/logo.svg',
                               toc: config.url + '/toc',
                               privacy: config.url + '/privacy',
                               continuity_url:
-                                config.url + '/manager/invoice/view/' + invoice._id,
+                                config.url +
+                                '/manager/invoice/view/' +
+                                invoice._id,
                               continuity_text: 'View Invoice'
                             };
-                            if (invoice.failedHistory.failedCount == 3) {
+                            if (newFailedCount == 3) {
                               sender.sendTemplateEmail(
                                 'invoice_failed_third_time_support',
                                 supportLocals,
@@ -1214,12 +1336,19 @@ module.exports = (ctx) => {
                               );
                             }
 
-                            invoice.save(callback);
+                            Invoice.updateOne(
+                              { _id: invoice._id },
+                              {
+                                $set: invoiceUpdate,
+                                $push: { processDates: new Date() }
+                              },
+                              callback
+                            );
                           }
                         });
                       } else {
                         // callback();
-                        invoice.failedHistory.date =
+                        const failedHistoryDate =
                           invoice.failedHistory.date == null
                             ? Date.now()
                             : invoice.failedHistory.date;
@@ -1231,25 +1360,22 @@ module.exports = (ctx) => {
                             invoice.failedHistory.reSubmitted == false
                               ? 'No'
                               : 'Yes',
-                          Days_since_failure:
-                            invoice.failedHistory.date == null
-                              ? 0
-                              : moment(new Date()).diff(
-                                  moment(new Date(invoice.failedHistory.date)),
-                                  'days'
-                                )
+                          Days_since_failure: moment(new Date()).diff(
+                            moment(new Date(failedHistoryDate)),
+                            'days'
+                          )
                         };
                         dailyFailedPaymentReport.push(report);
-                        invoice.status = 'Payment Failed';
-                        invoice.ticketGeneratedAutomaticallyForFailed = false;
-                        invoice.paymentStatus = 'no invoice found, Charge';
-                        invoice.processDates.push(new Date());
-                        invoice.failedHistory.reSubmitted =
-                          invoice.failedHistory.date == null
-                            ? invoice.failedHistory.reSubmitted
-                            : true;
-                        invoice.failedHistory.failedCount =
+                        const newFailedCount =
                           invoice.failedHistory.failedCount + 1;
+                        const invoiceUpdate = {
+                          status: 'Payment Failed',
+                          ticketGeneratedAutomaticallyForFailed: false,
+                          paymentStatus: 'no invoice found, Charge',
+                          'failedHistory.date': failedHistoryDate,
+                          'failedHistory.reSubmitted': true,
+                          'failedHistory.failedCount': newFailedCount
+                        };
                         const operatorsBuyer =
                           invoice.findSpaceUserId.additionalEmail
                             .filter(
@@ -1270,15 +1396,19 @@ module.exports = (ctx) => {
                           invoice.findSpaceUserId.additionalEmail
                             .filter((userObj) =>
                               userObj.notificationRoles.length > 0
-                                ? userObj.notificationRoles.includes('Invoicing')
+                                ? userObj.notificationRoles.includes(
+                                    'Invoicing'
+                                  )
                                 : false
                             )
                             .map((userObj) => userObj.email);
-                        const adminBuyer = invoice.findSpaceUserId.additionalEmail
-                          .filter(
-                            (userObj) => userObj.role.toLowerCase() === 'admin'
-                          )
-                          .map((userObj) => userObj.email);
+                        const adminBuyer =
+                          invoice.findSpaceUserId.additionalEmail
+                            .filter(
+                              (userObj) =>
+                                userObj.role.toLowerCase() === 'admin'
+                            )
+                            .map((userObj) => userObj.email);
 
                         const buyerLocals = {
                           name: invoice.findSpaceUserId
@@ -1294,7 +1424,9 @@ module.exports = (ctx) => {
                           invoiceNumber: invoice.globalInvoiceNumber
                             ? invoice.globalInvoiceNumber
                             : '0000',
-                          projectNumber: invoice.project.idNo,
+                          projectNumber: invoice.project
+                            ? invoice.project.idNo
+                            : 'N/A',
                           url: config.url,
                           logo: config.url + '/assets/images/logo.svg',
                           toc: config.url + '/toc',
@@ -1308,7 +1440,8 @@ module.exports = (ctx) => {
                               invoice._id
                             ),
                           continuity_text: 'View Invoice',
-                          ticket_url: config.url + `/buyer/ticket/?redirect=true`
+                          ticket_url:
+                            config.url + `/buyer/ticket/?redirect=true`
                         };
 
                         let dataObjProvider = {
@@ -1331,7 +1464,7 @@ module.exports = (ctx) => {
                         //   invoiceNumber: invoice.globalInvoiceNumber
                         //     ? invoice.globalInvoiceNumber
                         //     : '0000',
-                        //   projectNumber: invoice.project.idNo,
+                        //   projectNumber: invoice.project ? invoice.project.idNo : 'N/A',
                         //   email: invoice.findSpaceUserId.businessEmail,
                         //   url: config.url,
                         //   logo: config.url + '/assets/images/logo.svg',
@@ -1386,7 +1519,9 @@ module.exports = (ctx) => {
                           invoiceNumber: invoice.globalInvoiceNumber
                             ? invoice.globalInvoiceNumber
                             : '0000',
-                          projectNumber: invoice.project.idNo,
+                          projectNumber: invoice.project
+                            ? invoice.project.idNo
+                            : 'N/A',
                           url: config.url,
                           logo: config.url + '/assets/images/logo.svg',
                           toc: config.url + '/toc',
@@ -1395,7 +1530,7 @@ module.exports = (ctx) => {
                             config.url + '/manager/invoice/view/' + invoice._id,
                           continuity_text: 'View Invoice'
                         };
-                        if (invoice.failedHistory.failedCount == 3) {
+                        if (newFailedCount == 3) {
                           sender.sendTemplateEmail(
                             'invoice_failed_third_time_support',
                             supportLocals,
@@ -1404,7 +1539,14 @@ module.exports = (ctx) => {
                             `Invoice #${invoice.globalInvoiceNumber} Has Failed To Clear Payment Third time.`
                           );
                         }
-                        invoice.save(callback);
+                        Invoice.updateOne(
+                          { _id: invoice._id },
+                          {
+                            $set: invoiceUpdate,
+                            $push: { processDates: new Date() }
+                          },
+                          callback
+                        );
                       }
                     });
                 },
@@ -1514,7 +1656,7 @@ module.exports = (ctx) => {
             //                               invoiceNumber: invoice.globalInvoiceNumber
             //                                 ? invoice.globalInvoiceNumber
             //                                 : '0000',
-            //                               projectNumber: invoice.project.idNo,
+            //                               projectNumber: invoice.project ? invoice.project.idNo : 'N/A',
             //                               url: config.url,
             //                               logo:
             //                                 config.url + '/assets/images/logo.svg',

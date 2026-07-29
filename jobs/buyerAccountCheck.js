@@ -113,8 +113,17 @@ module.exports = () => {
                       //   '',
                       //   'Reminder - Create Your Project'
                       // );
-                      user.notifiedAboutProjectCreationAfterFourHours = true;
-                      user.save(callback);
+                      // updateOne (not .save()) — avoids Mongoose's
+                      // full-document dirty-path scan.
+                      FindSpaceUser.updateOne(
+                        { _id: user._id },
+                        {
+                          $set: {
+                            notifiedAboutProjectCreationAfterFourHours: true
+                          }
+                        },
+                        callback
+                      );
                     } else {
                       callback();
                     }
@@ -362,8 +371,17 @@ module.exports = () => {
                               //   '',
                               //   'Reminder - Your Project ' + project.idNo + ' has Quotes Ready'
                               // );
-                              project.ownerNotifiedAboutWarehouseSelectionAfterFourHours = true;
-                              project.save(callback);
+                              // updateOne (not .save()) — avoids Mongoose's
+                              // full-document dirty-path scan.
+                              Project.updateOne(
+                                { _id: project._id },
+                                {
+                                  $set: {
+                                    ownerNotifiedAboutWarehouseSelectionAfterFourHours: true
+                                  }
+                                },
+                                callback
+                              );
                             } else {
                               callback();
                             }
