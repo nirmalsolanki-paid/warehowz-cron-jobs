@@ -51,7 +51,7 @@ const CardSchema = new Schema({
   paymentMethodId: { type: String, default: '' },
   setupIntentId: { type: String, default: '' },
   mandateId: { type: String, default: '' },
-  microdepositType: { type: String, default: 'amounts' },
+  microdepositType: { type: String, default: 'amounts' }
 });
 
 mongoose.model('Card', CardSchema);

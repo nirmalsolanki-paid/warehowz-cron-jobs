@@ -18,7 +18,9 @@ module.exports = () => {
           toDate: { $lte: new Date() }
         }).exec();
         const today = new Date();
-        const before120Days = new Date(new Date().setDate(today.getDate() - 120));
+        const before120Days = new Date(
+          new Date().setDate(today.getDate() - 120)
+        );
         const potentiallyExpiredProjects = [];
         for (let i = 0; i < activeProjectsBeyondEndDate.length; i++) {
           const id = activeProjectsBeyondEndDate[i]._id;

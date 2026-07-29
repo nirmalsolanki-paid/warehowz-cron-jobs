@@ -5,7 +5,8 @@
   "description": "Standalone runner for Warehowz's scheduled background jobs (extracted out of the main app so job failures/load can no longer crash or slow down the web server).",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "lint:prettier": "prettier --write \"**/*.js\" --end-of-line auto"
   },
   "dependencies": {
     "@google-cloud/secret-manager": "^6.1.1",
@@ -20,5 +21,8 @@
     "node-schedule": "^2.1.1",
     "sendgrid": "~2.0.0",
     "stripe": "^22.1.1"
+  },
+  "devDependencies": {
+    "prettier": "^3.9.6"
   }
 }
