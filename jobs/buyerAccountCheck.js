@@ -12,22 +12,31 @@ module.exports = () => {
       new Promise((resolve) => {
         console.log('****** Scheduler runs every 4 hours ******');
         const state = {};
+        const now = Date.now();
+        const fourHoursAgo = new Date(now - 4 * 60 * 60 * 1000);
+        const fiveHoursAgo = new Date(now - 5 * 60 * 60 * 1000);
 
         // if the user has created any project specs within 4 hours of account creation
         async.series(
           [
             (cb) => {
+              // Narrowed to the 4-5h window instead of the whole collection —
+              // this used to fetch every non-deleted user and filter in JS,
+              // which grew unbounded and caused heap OOM crashes.
               FindSpaceUser.find({
-                delete: false
-              }).exec((err, users) => {
-                if (err) {
-                  cb(err);
+                delete: false,
+                createdAt: { $gt: fiveHoursAgo, $lte: fourHoursAgo }
+              })
+                .lean()
+                .exec((err, users) => {
+                  if (err) {
+                    cb(err);
 
-                  return;
-                }
-                state.users = users;
-                cb();
-              });
+                    return;
+                  }
+                  state.users = users;
+                  cb();
+                });
             },
             (cb) => {
               if (state.users && state.users.length) {
@@ -151,15 +160,23 @@ module.exports = () => {
             async.series(
               [
                 (cb) => {
-                  Project.find({}).exec((err, projects) => {
-                    if (err) {
-                      cb(err);
+                  // Narrowed to the 4-5h window instead of the whole
+                  // collection — this used to fetch every project in the
+                  // database and filter in JS, which grew unbounded and
+                  // caused heap OOM crashes.
+                  Project.find({
+                    createdAt: { $gt: fiveHoursAgo, $lte: fourHoursAgo }
+                  })
+                    .lean()
+                    .exec((err, projects) => {
+                      if (err) {
+                        cb(err);
 
-                      return;
-                    }
-                    state.projects = projects;
-                    cb();
-                  });
+                        return;
+                      }
+                      state.projects = projects;
+                      cb();
+                    });
                 },
                 (cb) => {
                   if (state.projects && state.projects.length) {
