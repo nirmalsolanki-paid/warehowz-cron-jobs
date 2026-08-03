@@ -1,59 +1,48 @@
-const schedule = require('node-schedule');
 const mongoose = require('mongoose');
 
+// Each job is now triggered by an HTTP request (see routes/jobs.js) instead
+// of firing on its own in-process node-schedule timer — Cloud Scheduler owns
+// timing and hits POST /jobs/:slug on the cron schedule configured there.
 const jobFactories = [
-  require('./queueTimeTracker'),
-  require('./projectRenewal'),
-  require('./projectExpiry'),
-  require('./paymentScheduler'),
-  require('./pendingStatusCheck'),
-  require('./buyerAccountCheck')
+  { slug: 'queue-time-tracker', factory: require('./queueTimeTracker') },
+  { slug: 'project-renewal', factory: require('./projectRenewal') },
+  { slug: 'project-expiry', factory: require('./projectExpiry') },
+  { slug: 'payment-scheduler', factory: require('./paymentScheduler') },
+  { slug: 'pending-status-check', factory: require('./pendingStatusCheck') },
+  { slug: 'buyer-account-check', factory: require('./buyerAccountCheck') }
 ];
 
-// Accepts either a cron string ('0 6 * * *') or a plain object of
-// RecurrenceRule fields ({ hour: 5, minute: [1] }).
-function buildRule(spec) {
-  if (typeof spec === 'string') return spec;
-  const rule = new schedule.RecurrenceRule();
-  Object.keys(spec).forEach((key) => {
-    rule[key] = spec[key];
-  });
-
-  return rule;
-}
-
-function startJobs(ctx) {
+// Builds a Map<slug, { name, run }> — same Settings.enableCronJobService
+// on/off switch the old node-schedule guard used, just checked per-request
+// instead of per-tick.
+function createJobRegistry(ctx) {
   const Settings = mongoose.model('Settings');
+  const jobs = new Map();
 
-  jobFactories.forEach((createJob) => {
-    const job = createJob(ctx);
+  jobFactories.forEach(({ slug, factory }) => {
+    const job = factory(ctx);
 
-    const guardedHandler = async () => {
-      const setting = await Settings.findOneAndUpdate(
-        {},
-        { $setOnInsert: { enableCronJobService: false } },
-        { upsert: true, new: true }
-      );
-      if (!setting || !setting.enableCronJobService) {
-        console.log(`[CronService] Skipped (disabled): ${job.name}`);
+    jobs.set(slug, {
+      name: job.name,
+      run: async () => {
+        const setting = await Settings.findOneAndUpdate(
+          {},
+          { $setOnInsert: { enableCronJobService: false } },
+          { upsert: true, new: true }
+        );
+        if (!setting || !setting.enableCronJobService) {
+          console.log(`[CronService] Skipped (disabled): ${job.name}`);
 
-        return;
+          return { skipped: true };
+        }
+        await job.run();
+
+        return { skipped: false };
       }
-      await job.run();
-    };
-
-    const instance = schedule.scheduleJob(buildRule(job.rule), guardedHandler);
-    // node-schedule emits 'error' on a rejected job promise; with no
-    // listener, EventEmitter throws that error, turning it into an
-    // unhandled rejection that would crash this whole process. Listening
-    // here means one job's failure just gets logged instead of killing
-    // every other scheduled job.
-    instance.on('error', (err) => {
-      console.error(`[CronService] Job "${job.name}" failed:`, err);
     });
-
-    console.log(`[CronService] Registered: ${job.name}`);
   });
+
+  return jobs;
 }
 
-module.exports = { startJobs };
+module.exports = { createJobRegistry };

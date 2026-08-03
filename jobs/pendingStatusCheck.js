@@ -11,7 +11,6 @@ module.exports = (ctx) => {
 
   return {
     name: 'PendingStatusCheck',
-    rule: { hour: 4, minute: [1] },
     run: () =>
       new Promise((resolve) => {
         console.log('* * * * * Check Pending Status * * * * * ');

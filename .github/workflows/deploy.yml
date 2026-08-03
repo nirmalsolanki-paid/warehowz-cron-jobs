@@ -1,4 +1,4 @@
-name: Deploy Production to Cloud Run
+name: Deploy Production to Cloud Run Jobs
 
 on:
   push:
@@ -32,19 +32,25 @@ jobs:
           gcloud builds submit . \
             --tag us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID_PROD }}/warehowz-cron/warehowz-cron-service:production
 
-      # Step 5: Deploy to Cloud Run
-      - name: Deploy to Cloud Run
+      # Step 5: Deploy one Cloud Run Job per cron job — same image every time,
+      # differing only by the JOB_SLUG env var each job runs with (see
+      # index.js / jobs/index.js). `jobs deploy` creates the job on its first
+      # run and updates it in place on every push after that. This does NOT
+      # create the Cloud Scheduler triggers — those are one-time setup, see
+      # README.md.
+      - name: Deploy Cloud Run Jobs
         run: |
-          gcloud run deploy warehowz-cron-service \
-            --image us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID_PROD }}/warehowz-cron/warehowz-cron-service:production \
-            --region ${{ secrets.GCP_REGION_PROD }} \
-            --platform managed \
-            --no-allow-unauthenticated \
-            --min-instances=1 \
-            --max-instances=1 \
-            --no-cpu-throttling \
-            --memory=4Gi \
-            --set-env-vars=NODE_OPTIONS=--max-old-space-size=3500 \
-            --port=8080 \
-            --vpc-connector=warehowz-connector \
-            --vpc-egress=all-traffic
+          IMAGE="us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID_PROD }}/warehowz-cron/warehowz-cron-service:production"
+          SLUGS="queue-time-tracker buyer-account-check pending-status-check payment-scheduler project-renewal project-expiry"
+
+          for SLUG in $SLUGS; do
+            gcloud run jobs deploy "warehowz-cron-$SLUG" \
+              --image="$IMAGE" \
+              --region=${{ secrets.GCP_REGION_PROD }} \
+              --memory=4Gi \
+              --task-timeout=1800s \
+              --max-retries=3 \
+              --set-env-vars="JOB_SLUG=$SLUG,NODE_OPTIONS=--max-old-space-size=3500" \
+              --vpc-connector=warehowz-connector \
+              --vpc-egress=all-traffic
+          done

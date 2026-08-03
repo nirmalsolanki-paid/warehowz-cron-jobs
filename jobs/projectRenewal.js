@@ -7,7 +7,6 @@ module.exports = (ctx) => {
 
   return {
     name: 'ProjectRenewal',
-    rule: '0 6 * * *',
     run: async () => {
       try {
         console.log('***** Checking project renew *****');

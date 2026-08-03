@@ -46,7 +46,6 @@ module.exports = (ctx) => {
 
   return {
     name: 'PaymentScheduler',
-    rule: { hour: 5, minute: [1] },
     run: () =>
       new Promise((resolve) => {
         console.log('***Payment Scheduler started***');

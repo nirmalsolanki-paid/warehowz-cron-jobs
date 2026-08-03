@@ -7,7 +7,6 @@ module.exports = () => {
 
   return {
     name: 'ProjectExpiry',
-    rule: '0 6 * * *',
     run: async () => {
       // for every week - cron  - 0 0 * * 0
       console.log('* * * * * Closing Inactive Projects * * * * * ');

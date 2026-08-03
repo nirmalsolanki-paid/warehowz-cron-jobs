@@ -1,36 +1,31 @@
-const http = require('http');
 const { getEnvFromSecretManager } = require('./config/secret-manager');
 const config = require('./config');
 
-// Cloud Run requires the container to bind $PORT and answer health checks;
-// this service is otherwise a pure background worker with no inbound traffic.
-function startHealthServer() {
-  const port = process.env.PORT || 8080;
-  http
-    .createServer((_req, res) => {
-      res.writeHead(200, { 'Content-Type': 'text/plain' });
-      res.end('ok');
-    })
-    .listen(port, () => {
-      console.log(`✅ Health check server listening on port ${port}`);
-    });
-}
-
-async function main() {
-  startHealthServer();
+// Cloud Run Job entry point — this process runs ONE job, then exits. Which
+// job is picked via the JOB_SLUG env var set on that particular Cloud Run
+// Job resource (see README: one Cloud Run Job per cron job, each pointing
+// at the same image with a different JOB_SLUG). There is no HTTP server —
+// Cloud Scheduler triggers execution via the Cloud Run Admin API, not by
+// hitting a URL this container serves.
+async function run() {
+  const slug = process.env.JOB_SLUG;
+  if (!slug) {
+    throw new Error(
+      'JOB_SLUG env var is required — set it on the Cloud Run Job so this execution knows which cron job to run.'
+    );
+  }
 
   const secrets = await getEnvFromSecretManager();
   config.init(secrets);
-  console.log(`✅ Cron service initialized secrets for ${config.NODE_ENV}`);
+  console.log(`✅ Cron job runner initialized secrets for ${config.NODE_ENV}`);
 
   if (!config.db) {
-    console.error('❌ MONGODB_CONNECTION_STRING missing from secret payload');
-    process.exit(1);
+    throw new Error('MONGODB_CONNECTION_STRING missing from secret payload');
   }
 
   const mongoose = require('mongoose');
 
-  const mongooseOptions = {
+  await mongoose.connect(config.db, {
     keepAlive: true,
     useNewUrlParser: true,
     useFindAndModify: true,
@@ -39,67 +34,49 @@ async function main() {
     connectTimeoutMS: 10000,
     serverSelectionTimeoutMS: 10000,
     socketTimeoutMS: 45000
-  };
-
-  mongoose.connect(config.db, mongooseOptions);
-
-  const db = mongoose.connection;
-
-  let hasConnectedOnce = false;
-  let startupConnectTimer = null;
-  const STARTUP_CONNECT_TIMEOUT_MS = 45000;
-
-  db.on('error', (err) => {
-    console.error('❌ MongoDB connection error:', err);
-    if (!hasConnectedOnce) {
-      // The driver (useUnifiedTopology) retries connecting in the background
-      // on its own; a single error here can be a transient blip, so give it
-      // a grace window before treating startup as failed.
-      if (!startupConnectTimer) {
-        startupConnectTimer = setTimeout(() => {
-          console.error(
-            `Unable to connect to database after ${STARTUP_CONNECT_TIMEOUT_MS}ms of retries`
-          );
-          process.exit(1);
-        }, STARTUP_CONNECT_TIMEOUT_MS);
-      }
-    }
   });
+  console.log('✅ Database connection successful');
 
-  db.on('connected', () => {
-    hasConnectedOnce = true;
-    if (startupConnectTimer) {
-      clearTimeout(startupConnectTimer);
-      startupConnectTimer = null;
-    }
-    console.log('✅ Database connection successful');
+  // Register all models before any job requires mongoose.model('X').
+  require('glob')
+    .sync(__dirname + '/models/*.js')
+    .forEach((model) => require(model));
 
-    // Register all models before any job requires mongoose.model('X').
-    require('glob')
-      .sync(__dirname + '/models/*.js')
-      .forEach((model) => require(model));
+  // Required only after config.init() has populated config, and after
+  // config.NODE_ENV is set — config/emails.js reads it at require-time.
+  const emailsConfig = require('./config/emails');
+  const sender = require('./lib/notification')();
+  const stripe = require('stripe')(config.stripe.secret_key);
+  const { createJobRegistry } = require('./jobs');
 
-    // Required only after config.init() has populated config, and after
-    // config.NODE_ENV is set — config/emails.js reads it at require-time.
-    const emailsConfig = require('./config/emails');
-    const sender = require('./lib/notification')();
-    const stripe = require('stripe')(config.stripe.secret_key);
-    const { startJobs } = require('./jobs');
+  const jobs = createJobRegistry({ config, sender, emailsConfig, stripe });
+  const job = jobs.get(slug);
+  if (!job) {
+    throw new Error(
+      `Unknown JOB_SLUG "${slug}" — must be one of: ${Array.from(jobs.keys()).join(', ')}`
+    );
+  }
 
-    startJobs({ config, sender, emailsConfig, stripe });
-    console.log('🚀 Cron service running');
-  });
+  console.log(`🚀 Running job: ${job.name}`);
+  const result = await job.run();
+  console.log(`✅ Job finished: ${job.name}`, result);
+
+  await mongoose.disconnect();
 }
 
-main().catch((err) => {
-  console.error('❌ Failed to load secrets or start cron service:', err);
+run()
+  .then(() => process.exit(0))
+  .catch((err) => {
+    console.error('❌ Cron job failed:', err);
+    process.exit(1);
+  });
+
+process.on('uncaughtException', (err) => {
+  console.error('[CronJob] uncaughtException:', err);
   process.exit(1);
 });
 
-process.on('uncaughtException', (err) => {
-  console.error('[CronService] uncaughtException:', err);
-});
-
 process.on('unhandledRejection', (err) => {
-  console.error('[CronService] unhandledRejection:', err);
+  console.error('[CronJob] unhandledRejection:', err);
+  process.exit(1);
 });

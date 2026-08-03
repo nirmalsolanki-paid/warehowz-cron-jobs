@@ -7,7 +7,6 @@ module.exports = () => {
 
   return {
     name: 'BuyerAccountCheck',
-    rule: '1 */4 * * *',
     run: () =>
       new Promise((resolve) => {
         console.log('****** Scheduler runs every 4 hours ******');

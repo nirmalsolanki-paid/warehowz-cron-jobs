@@ -508,7 +508,6 @@ module.exports = (ctx) => {
 
   return {
     name: 'QueueTimeTracker',
-    rule: '* * * * *',
     run: async () => {
       if (isRunning) return;
       isRunning = true;
